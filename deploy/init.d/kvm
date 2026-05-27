@@ -1,0 +1,116 @@
+#!/bin/sh /etc/rc.common
+# /etc/init.d/kvm — IP-KVM 开机自启
+#
+# 启动顺序：START=99（最后启动，确保 USB/UART 已就绪）
+# 停止顺序：STOP=01（最先停止）
+#
+# 用法：
+#   /etc/init.d/kvm start
+#   /etc/init.d/kvm stop
+#   /etc/init.d/kvm restart
+#   /etc/init.d/kvm enable   # 开机自启
+#   /etc/init.d/kvm status
+
+START=99
+STOP=01
+
+KVM_MANAGER="/usr/sbin/kvm_manager"
+KVM_HID="/usr/sbin/kvm_hid"
+PIDFILE_MGR="/var/run/kvm_manager.pid"
+PIDFILE_HID="/var/run/kvm_hid.pid"
+
+start() {
+    # 1. USB 系统调优
+    echo "Tuning USB subsystem..."
+    echo -1 > /sys/module/usbcore/parameters/autosuspend 2>/dev/null
+    echo 'Y' > /sys/module/usbcore/parameters/old_scheme_first 2>/dev/null
+
+    # 2. 串口调优（低延迟）
+    if [ -c /dev/ttyS1 ]; then
+        setserial /dev/ttyS1 low_latency 2>/dev/null || true
+    fi
+
+    # 3. 启动 HID 守护进程（实时优先级）
+    echo "Starting kvm_hid..."
+    $KVM_HID -p /tmp/kvm_hid.sock -d /dev/ttyS1 -b 115200
+    # 等待 daemon 就绪（父进程退出后子进程接管），最多等 1 秒
+    for _ in 1 2 3 4 5 6 7 8 9 10; do
+        PID_HID=$(_pidof kvm_hid)
+        [ -n "$PID_HID" ] && break
+        usleep 100000 2>/dev/null || sleep 0.1
+    done
+    if [ -n "$PID_HID" ]; then
+        chrt -f 50 -p "$PID_HID" 2>/dev/null || true
+        echo "$PID_HID" > "$PIDFILE_HID"
+    fi
+
+    # 4. 启动 WebSocket 管理器
+    echo "Starting kvm_manager..."
+    $KVM_MANAGER -p 8765 -s /tmp/kvm_hid.sock
+    for _ in 1 2 3 4 5 6 7 8 9 10; do
+        PID_MGR=$(_pidof kvm_manager)
+        [ -n "$PID_MGR" ] && break
+        usleep 100000 2>/dev/null || sleep 0.1
+    done
+    [ -n "$PID_MGR" ] && echo "$PID_MGR" > "$PIDFILE_MGR"
+
+    logger -t kvm "IP-KVM started (hid=$PID_HID manager=$PID_MGR)"
+}
+
+stop() {
+    echo "Stopping IP-KVM..."
+
+    # 先停管理器（会停 mjpg_streamer）
+    if [ -f "$PIDFILE_MGR" ]; then
+        kill "$(cat $PIDFILE_MGR)" 2>/dev/null
+        rm -f "$PIDFILE_MGR"
+    fi
+
+    # 再停 HID 守护进程
+    if [ -f "$PIDFILE_HID" ]; then
+        kill "$(cat $PIDFILE_HID)" 2>/dev/null
+        rm -f "$PIDFILE_HID"
+    fi
+
+    # 保险：杀死残留进程
+    killall kvm_manager kvm_hid mjpg_streamer 2>/dev/null || true
+
+    # 清理 socket 文件
+    rm -f /tmp/kvm_hid.sock
+
+    logger -t kvm "IP-KVM stopped"
+}
+
+restart() {
+    stop
+    sleep 1
+    start
+}
+
+# 检测进程是否运行的辅助函数（兼容无 pidof 的 OpenWRT 最小构建）
+_pidof() {
+    local name="$1"
+    local pid
+    if command -v pidof >/dev/null 2>&1; then
+        pidof "$name" 2>/dev/null || true
+    else
+        # 回退：遍历 /proc
+        for p in /proc/[0-9]*/cmdline; do
+            [ -f "$p" ] && grep -q "$name" "$p" 2>/dev/null && echo "${p%/cmdline}"
+        done 2>/dev/null | sed 's|/proc/||' | head -1
+    fi
+}
+
+status() {
+    local hid_running=0
+    local mgr_running=0
+    local stream_running=0
+
+    [ -n "$(_pidof kvm_hid)" ] && hid_running=1
+    [ -n "$(_pidof kvm_manager)" ] && mgr_running=1
+    [ -n "$(_pidof mjpg_streamer)" ] && stream_running=1
+
+    echo "kvm_hid:       $([ $hid_running -eq 1 ] && echo 'running' || echo 'stopped')"
+    echo "kvm_manager:   $([ $mgr_running -eq 1 ] && echo 'running' || echo 'stopped')"
+    echo "mjpg_streamer: $([ $stream_running -eq 1 ] && echo 'running' || echo 'stopped')"
+}

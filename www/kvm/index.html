@@ -1,0 +1,52 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>IP-KVM 远程控制</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<div id="container">
+  <h1>IP-KVM 远程控制</h1>
+
+  <!-- 状态栏 -->
+  <div id="status-bar">
+    <span id="status-indicator" class="offline">●</span>
+    <span id="status-text">正在连接...</span>
+    <span id="fps-display"></span>
+  </div>
+
+  <!-- 视频画面 -->
+  <div id="video-wrapper">
+    <img id="kvm-screen" src="" alt="KVM 画面">
+    <canvas id="mouse-canvas"></canvas>
+  </div>
+
+  <!-- 工具条 -->
+  <div id="toolbar">
+    <button id="btn-fullscreen" title="全屏">⛶ 全屏</button>
+    <label>
+      质量:
+      <select id="quality-select">
+        <option value="80">高 (80%)</option>
+        <option value="50" selected>中 (50%)</option>
+        <option value="30">低 (30%)</option>
+      </select>
+    </label>
+    <button id="btn-refresh" title="刷新画面">🔄 刷新</button>
+    <span id="connection-info"></span>
+  </div>
+
+  <!-- 快捷键提示 -->
+  <div id="help-bar">
+    Ctrl+Alt+Del | Alt+Tab | Ctrl+Shift+Esc
+  </div>
+</div>
+
+<!-- OSD 键盘状态 -->
+<div id="osd"></div>
+
+<script src="kvm.js"></script>
+</body>
+</html>
