@@ -1,0 +1,161 @@
+#!/bin/sh
+# nas-kvm-ctl — nas-kvmd 的辅助脚本（由 kvmd、init 脚本、LuCI 页面调用）
+#   bindip                    解析监听地址（供 init 与 ustreamer 使用）
+#   disable-upstream          只关掉与本包冲突的上游 ustreamer 实例（设备或端口相同），其它实例不动
+#   port-check PORT SECS IP.. 等端口空出来；被别的程序占用则输出占用者名称并返回 1
+#   serial-scan               列出 ttyUSB*/ttyACM* 及其 USB VID:PID，标出自动探测会选用哪个
+#   probe                     输出 "hdmi=0|1|-1 ping=0|1|-1"（kvmd 异步调用）
+#   uciset KEY VAL [KEY VAL]  写入 UCI 并 commit（kvmd 热更新配置时调用，不重启服务）
+#   status | serial-test | macro-test menu|bios | release
+#                             通过本机回环调用 kvmd API，输出 JSON
+
+conf() { uci -q get "nas-kvm.main.$1"; }
+
+bindip() {
+	b="$(conf bind)"
+	case "$b" in
+	*.*.*.*) echo "$b" ;;
+	br-lan|lan|"")
+		. /lib/functions/network.sh
+		network_get_ipaddr ip lan && echo "$ip"
+		;;
+	*) echo 127.0.0.1 ;;
+	esac
+}
+
+# 上游 ustreamer 包会同时装上 /etc/config/ustreamer（默认 enabled=1，设备 /dev/video0，监听 [::]:8080）、
+# /etc/init.d/ustreamer（START=90）和 /etc/hotplug.d/usb/20-ustreamer（USB 插入时无条件 start）。
+# 它会抢走本包要用的 /dev/video0，且视频流对所有接口开放、没有认证。
+#
+# 只处理「与本包冲突」的 section：占用同一个视频设备，或占用 kvmd / 视频流端口。
+# 无关的实例（例如另一个摄像头）保持原样，也不会被停掉。
+# 上游 init 对缺省值的约定：device=/dev/video0，port=8080；section 里没写时按此补齐再比较。
+# 上游 init 只启动 enabled 为真的 section，所以把冲突的 section 置 0 后，hotplug 再 start 就是空操作。
+# 没有冲突时完全不碰上游（不 commit、不 stop），所以每次启动都执行也没有副作用。
+disable_upstream() {
+	dev="$(conf video_device)"; dev="${dev:-/dev/video0}"
+	kp="$(conf listen_port)"; kp="${kp:-18080}"
+	vp="$(conf video_port)"; vp="${vp:-18081}"
+	changed=0
+	for s in $(uci -q show ustreamer 2>/dev/null | sed -n 's/^\(ustreamer\.[^.=]*\)\.enabled=.*/\1/p'); do
+		case "$(uci -q get "$s.enabled")" in
+		1|on|yes|true|enabled) ;;
+		*) continue ;;
+		esac
+		d="$(uci -q get "$s.device")"; d="${d:-/dev/video0}"
+		p="$(uci -q get "$s.port")"; p="${p:-8080}"
+		if [ "$d" = "$dev" ] || [ "$p" = "$kp" ] || [ "$p" = "$vp" ]; then
+			uci set "$s.enabled=0"; changed=1
+			echo "disabled conflicting upstream ustreamer section $s (device=$d port=$p)"
+		fi
+	done
+	if [ "$changed" = 1 ]; then
+		uci commit ustreamer
+		up="${UPSTREAM_INIT:-/etc/init.d/ustreamer}"
+		[ -x "$up" ] && "$up" restart >/dev/null 2>&1
+	fi
+	return 0
+}
+
+# IPv4 点分十进制 → /proc/net/tcp 里的小端十六进制
+ip2hex() { ( IFS=.; set -- $1; [ $# -eq 4 ] && printf '%02X%02X%02X%02X' "$4" "$3" "$2" "$1" ); }
+
+# listen_inode PORT [IP...]：端口上有监听（通配地址，或给定的某个 IPv4 地址）则输出 socket inode
+listen_inode() {
+	port="$1"; shift
+	hex="$(printf '%04X' "$port")"
+	ips="00000000"
+	for a in "$@"; do h="$(ip2hex "$a")"; [ -n "$h" ] && ips="$ips $h"; done
+	awk -v hex="$hex" -v ips="$ips" '
+		BEGIN { n = split(ips, l, " "); for (i = 1; i <= n; i++) ok[l[i]] = 1 }
+		FNR > 1 && $4 == "0A" {
+			m = split($2, a, ":")
+			if (a[m] != hex) next
+			ad = a[1]
+			if (length(ad) == 32) {
+				if (ad ~ /^0+$/) ad = "00000000"
+				else if (substr(ad, 1, 24) == "0000000000000000FFFF0000") ad = substr(ad, 25)
+			}
+			if (ad in ok) { print $10; exit }
+		}' "${PROCNET:-/proc/net}/tcp" "${PROCNET:-/proc/net}/tcp6" 2>/dev/null
+}
+
+# inode_owner INODE：输出持有该 socket 的进程名
+inode_owner() {
+	pid="$(ls -l /proc/[0-9]*/fd 2>/dev/null | awk -v t="socket:[$1]" '
+		/^\/proc\/[0-9]+\/fd:$/ { split($0, a, "/"); pid = a[3] }
+		index($0, t) { print pid; exit }')"
+	[ -n "$pid" ] && cat "/proc/$pid/comm" 2>/dev/null
+}
+
+# port-check PORT SECS IP...：最多等 SECS 秒让端口空出来。
+# 空出来、或占用者就是 nas-kvmd / ustreamer（重复 start 或旧进程正在退出，交给 procd）返回 0；
+# 仍被别的程序占用则输出占用者名称返回 1。
+port_check() {
+	port="$1"; secs="$2"; shift 2
+	i=0
+	while :; do
+		ino="$(listen_inode "$port" "$@")"
+		[ -z "$ino" ] && return 0
+		who="$(inode_owner "$ino")"
+		case "$who" in nas-kvmd|ustreamer) return 0 ;; esac
+		[ "$i" -ge "$secs" ] && { echo "${who:-unknown process}"; return 1; }
+		i=$((i + 1)); sleep 1
+	done
+}
+
+# serial-scan：与 nas-kvmd 自动探测同一套规则（serial_ids 白名单，默认 CH340/CH341）
+serial_scan() {
+	ids="$(conf serial_ids)"; ids="${ids:-1a86:7523,1a86:5523}"
+	ids="$(echo "$ids" | tr 'A-F ' 'a-f,')"
+	sysb="${SYSFS:-/sys}"
+	for t in "$sysb"/class/tty/ttyUSB* "$sysb"/class/tty/ttyACM*; do
+		[ -e "$t" ] || continue
+		id=""
+		for up in "" /.. /../.. /../../..; do
+			v="$(cat "$t/device$up/idVendor" 2>/dev/null)"
+			if [ -n "$v" ]; then id="$(echo "$v:$(cat "$t/device$up/idProduct" 2>/dev/null)" | tr 'A-F' 'a-f')"; break; fi
+		done
+		m=no; case ",$ids," in *",$id,"*) m=yes ;; esac
+		echo "/dev/${t##*/} ${id:-unknown} matched=$m"
+	done
+}
+
+api() { # METHOD PATH [DATA]
+	port="$(conf listen_port)"; tok="$(conf token)"
+	if [ "$1" = GET ]; then
+		wget -qO- -T3 --header="Authorization: Bearer $tok" "http://127.0.0.1:${port:-18080}$2"
+	else
+		wget -qO- -T5 --header="Authorization: Bearer $tok" \
+			--header="Content-Type: application/json" \
+			--post-data="${3:-{\}}" "http://127.0.0.1:${port:-18080}$2"
+	fi
+}
+
+cmd="$1"; shift
+case "$cmd" in
+bindip) bindip ;;
+disable-upstream) disable_upstream ;;
+port-check) port_check "$@" ;;
+serial-scan) serial_scan ;;
+probe)
+	hdmi=-1; ping=-1
+	vp="$(conf video_port)"; nip="$(conf nas_ip)"; ip="$(bindip)"
+	if st="$(wget -qO- -T1 "http://${ip:-127.0.0.1}:${vp:-18081}/state" 2>/dev/null)"; then
+		if echo "$st" | grep -Eq '"online"[[:space:]]*:[[:space:]]*true'; then hdmi=1; else hdmi=0; fi
+	fi
+	if [ -n "$nip" ]; then
+		if ping -c1 -W1 "$nip" >/dev/null 2>&1; then ping=1; else ping=0; fi
+	fi
+	echo "hdmi=$hdmi ping=$ping"
+	;;
+uciset)
+	while [ $# -ge 2 ]; do uci set "nas-kvm.main.$1=$2"; shift 2; done
+	uci commit nas-kvm
+	;;
+status) api GET /api/status ;;
+serial-test) api POST /api/serial/test ;;
+release) api POST /api/release ;;
+macro-test) api POST /api/macro/test "{\"kind\":\"$1\"}" ;;
+*) echo "usage: nas-kvm-ctl bindip|disable-upstream|port-check|serial-scan|probe|uciset|status|serial-test|macro-test menu|bios|release" >&2; exit 2 ;;
+esac

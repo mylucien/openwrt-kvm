@@ -1,0 +1,10 @@
+#!/bin/sh
+# 安装/首次启动时执行一次：关掉上游 ustreamer 的默认实例（见 nas-kvm-ctl disable-upstream）
+/usr/bin/nas-kvm-ctl disable-upstream >/dev/null 2>&1
+
+# 电源按键功能已移除：清掉旧配置里残留的选项（不存在也无妨）
+for o in power_led press_ms force_ms cycle_wait_s min_interval_s pre_press; do
+	uci -q delete nas-kvm.main.$o
+done
+uci -q commit nas-kvm
+exit 0

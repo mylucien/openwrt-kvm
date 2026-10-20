@@ -1,0 +1,71 @@
+#!/bin/sh /etc/rc.common
+# nas-kvm：kvmd（键鼠/宏/网页）+ ustreamer（HDMI 视频）
+
+START=95
+STOP=10
+USE_PROCD=1
+
+KVMD=/usr/sbin/nas-kvmd
+USTREAMER=/usr/bin/ustreamer
+CTL=/usr/bin/nas-kvm-ctl
+
+service_triggers() {
+	procd_add_reload_trigger nas-kvm
+	# LAN 地址就绪后（重新）拉起，保证绑定到 br-lan 的 IP
+	procd_add_interface_trigger "interface.*.up" lan /etc/init.d/nas-kvm restart
+}
+
+start_service() {
+	local enabled token ip vdev res fps vport port who
+
+	config_load nas-kvm
+	config_get_bool enabled main enabled 1
+	[ "$enabled" = 1 ] || return 0
+
+	config_get token main token ""
+	if [ "${#token}" -lt 16 ]; then
+		token="$(tr -dc 'a-f0-9' </dev/urandom | head -c 32)"
+		uci set nas-kvm.main.token="$token"
+		uci commit nas-kvm
+		logger -t nas-kvm "generated a new access token"
+	fi
+
+	# 上游 ustreamer 包的默认实例会抢 /dev/video0：只关掉与本包冲突的 section，其它实例不动
+	$CTL disable-upstream | while read -r line; do
+		[ -n "$line" ] && logger -t nas-kvm "$line"
+	done
+
+	ip="$($CTL bindip)"
+	if [ -z "$ip" ]; then
+		logger -t nas-kvm "bind address not ready yet, waiting for interface trigger"
+		return 0
+	fi
+
+	config_get vdev main video_device /dev/video0
+	config_get res main resolution 1920x1080
+	config_get fps main desired_fps 30
+	config_get vport main video_port 18081
+	config_get port main listen_port 18080
+
+	# 端口被别的程序占用时不硬抢（否则要么本包起不来，要么把对方挤掉），写一条明确的日志后跳过
+	if who="$($CTL port-check "$port" 3 "$ip" 127.0.0.1)"; then
+		procd_open_instance kvmd
+		procd_set_param command "$KVMD" --bind "$ip"
+		procd_set_param respawn 3600 5 5
+		procd_set_param stderr 1
+		procd_close_instance
+	else
+		logger -t nas-kvm "TCP port $port is in use by '$who'; nas-kvmd NOT started (change nas-kvm.main.listen_port)"
+	fi
+
+	if [ -x "$USTREAMER" ] && ! who="$($CTL port-check "$vport" 3 "$ip")"; then
+		logger -t nas-kvm "TCP port $vport is in use by '$who'; ustreamer NOT started (change nas-kvm.main.video_port)"
+	elif [ -x "$USTREAMER" ]; then
+		procd_open_instance ustreamer
+		procd_set_param command "$USTREAMER" --device "$vdev" --format MJPEG \
+			--resolution "$res" --host "$ip" --port "$vport" --desired-fps "$fps"
+		procd_set_param respawn 3600 5 5
+		procd_set_param stderr 1
+		procd_close_instance
+	fi
+}

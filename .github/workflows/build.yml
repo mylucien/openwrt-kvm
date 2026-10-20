@@ -1,0 +1,193 @@
+name: build
+
+# 测试（主机上）→ 用 ImmortalWrt 官方 SDK 容器编译 aarch64（AN7581 光猫）与 x86_64 → 打 tag 时发布 Release。
+# ponwrt 的固件是 apk 包管理（configs/an7581.config 里 CONFIG_USE_APK=y，且没有 opkg），
+# 所以快照 SDK 产出的是 .apk；如果 sdk_suffix 指向仍用 ipk 的旧分支，产出的就是 .ipk，下面的收集步骤两种都认。
+
+on:
+  push:
+    branches: [main, master]
+    tags: ["v*"]
+    paths-ignore: ["**.md"]
+  pull_request:
+    paths-ignore: ["**.md"]
+  workflow_dispatch:
+    inputs:
+      sdk_suffix:
+        description: "SDK 容器 tag 后缀。留空 = 最新快照（与跟随 ImmortalWrt master 的 ponwrt 最接近）；例如 -openwrt-24.10"
+        required: false
+        default: ""
+
+permissions:
+  contents: read
+
+concurrency:
+  group: build-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  test:
+    name: host tests
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Tag matches package versions
+        if: startsWith(github.ref, 'refs/tags/')
+        run: |
+          ver="$(sed -n 's/^PKG_VERSION:=//p' nas-kvm/Makefile)"
+          luci_ver="$(sed -n 's/^PKG_VERSION:=//p' luci-app-nas-kvm/Makefile)"
+          if [ "$GITHUB_REF_NAME" != "v$ver" ]; then
+            echo "::error::tag $GITHUB_REF_NAME does not match nas-kvm PKG_VERSION $ver"; exit 1
+          fi
+          if [ "$ver" != "$luci_ver" ]; then
+            echo "::error::nas-kvm ($ver) and luci-app-nas-kvm ($luci_ver) PKG_VERSION differ"; exit 1
+          fi
+
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 22
+
+      - name: Install tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends gcc libc6-dev busybox-static
+          mkdir -p "$RUNNER_TEMP/jsdom"
+          cd "$RUNNER_TEMP/jsdom" && npm install --no-audit --no-fund jsdom
+
+      - name: Build nas-kvmd (ASan + UBSan, hardening flags)
+        working-directory: nas-kvm
+        run: |
+          gcc -O2 -Wall -Wextra -Werror=format-security -D_FORTIFY_SOURCE=2 -fstack-protector-strong \
+            -fsanitize=address,undefined -g -o nas-kvmd \
+            src/kvmd.c src/ch9329.c src/hid_map.c src/sha1b64.c
+
+      - name: Daemon tests
+        working-directory: nas-kvm
+        run: |
+          python3 tests/test_kvmd.py ./nas-kvmd
+          python3 tests/test_serial_detect.py ./nas-kvmd
+
+      - name: Shell script tests
+        working-directory: nas-kvm
+        run: |
+          python3 tests/test_ctl.py
+          python3 tests/test_init.py
+
+      - name: Shell script tests with busybox applets (closer to the router)
+        working-directory: nas-kvm
+        run: |
+          mkdir -p "$RUNNER_TEMP/bb"
+          for a in sh awk ls tr cat sed grep cut head mv printf sleep readlink tail; do
+            ln -sf "$(command -v busybox)" "$RUNNER_TEMP/bb/$a"
+          done
+          for f in files/usr/bin/nas-kvm-ctl files/etc/init.d/nas-kvm files/etc/uci-defaults/90-nas-kvm; do
+            busybox ash -n "$f"
+          done
+          PATH="$RUNNER_TEMP/bb:$PATH" python3 tests/test_ctl.py
+          PATH="$RUNNER_TEMP/bb:$PATH" python3 tests/test_init.py
+
+      - name: Front-end and LuCI view tests
+        working-directory: nas-kvm
+        run: |
+          python3 tests/test_ui.py ./nas-kvmd files/www/kvm "$RUNNER_TEMP/jsdom/node_modules/jsdom"
+          node tests/luci_view_mock.js ../luci-app-nas-kvm/htdocs/luci-static/resources/view/nas-kvm/config.js
+
+  build:
+    name: build (${{ matrix.label }})
+    needs: test
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # AN7581 光猫本体：ARM64（Cortex-A53），SDK 容器 tag 为 <target>，即 airoha-an7581
+          - label: aarch64_cortex-a53
+            sdk: airoha-an7581
+          # x86_64：SDK 容器 tag 为 x86-64
+          - label: x86_64
+            sdk: x86-64
+          # 需要别的架构时照此加一项，sdk 填 ImmortalWrt 的 <target>（斜杠换成横线）或 <ARCH>，
+          # label 填软件包架构，例如：
+          # - label: arm_cortex-a7_neon-vfpv4
+          #   sdk: arm_cortex-a7_neon-vfpv4
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+
+      # 第三方 action 固定到提交（对应 immortalwrt/gh-action-sdk 的 master）。
+      # 它会拿到下面的签名密钥，所以不跟着分支走；要升级请自行审阅后更换 SHA。
+      - name: Build packages with the ImmortalWrt SDK
+        uses: immortalwrt/gh-action-sdk@c4848d7f7d899d80e6d98630f0a21ab2e9c4724f
+        env:
+          ARCH: ${{ matrix.sdk }}${{ github.event.inputs.sdk_suffix }}
+          PACKAGES: nas-kvm luci-app-nas-kvm
+          NO_SHFMT_CHECK: "1"
+          NO_REFRESH_CHECK: "1"
+          # 可选：签名密钥只在打 tag 发布时才交给构建容器。不设置则产出未签名的包。
+          PRIVATE_KEY: ${{ startsWith(github.ref, 'refs/tags/') && secrets.APK_PRIVATE_KEY || '' }}
+          KEY_BUILD: ${{ startsWith(github.ref, 'refs/tags/') && secrets.IPK_KEY_BUILD || '' }}
+
+      - name: Collect nas-kvm packages
+        run: |
+          mkdir -p out
+          find bin -type f \( -name '*nas-kvm*.apk' -o -name '*nas-kvm*.ipk' \) -exec cp -v {} out/ \;
+          n="$(find out -type f | wc -l)"
+          if [ "$n" -lt 2 ]; then
+            echo "::error::expected nas-kvm and luci-app-nas-kvm packages, found $n"
+            find bin -type f | head -50
+            exit 1
+          fi
+          (cd out && sha256sum -- * > SHA256SUMS)
+          {
+            echo "### ${{ matrix.label }}"
+            echo
+            echo '```'
+            (cd out && ls -l)
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: packages-${{ matrix.label }}
+          path: out/*
+          if-no-files-found: error
+
+      - name: Upload build logs on failure
+        if: failure()
+        uses: actions/upload-artifact@v7
+        with:
+          name: logs-${{ matrix.label }}
+          path: logs/
+          if-no-files-found: ignore
+
+  release:
+    name: release
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v8
+        with:
+          pattern: packages-*
+          path: dl
+
+      - name: Bundle per architecture
+        run: |
+          mkdir release
+          for d in dl/packages-*; do
+            label="${d#dl/packages-}"
+            tar -czf "release/nas-kvm-${GITHUB_REF_NAME#v}-${label}.tar.gz" -C "$d" .
+          done
+          (cd release && sha256sum -- * > SHA256SUMS)
+          ls -l release
+
+      - uses: softprops/action-gh-release@v3
+        with:
+          files: release/*
+          generate_release_notes: true

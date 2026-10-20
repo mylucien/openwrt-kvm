@@ -1,0 +1,14 @@
+{
+	"admin/services/nas-kvm": {
+		"title": "NAS KVM",
+		"order": 60,
+		"action": {
+			"type": "view",
+			"path": "nas-kvm/config"
+		},
+		"depends": {
+			"acl": [ "luci-app-nas-kvm" ],
+			"uci": { "nas-kvm": true }
+		}
+	}
+}

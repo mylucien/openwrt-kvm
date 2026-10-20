@@ -1,19 +1,11 @@
-# 编译产物
-build/
-*.o
-*.obj
-*.exe
-
-# 开发工具
-.vscode/
-.idea/
-*.swp
-*.swo
-*~
-
-# 测试临时文件
-/tmp/
-
-# 系统文件
-.DS_Store
-Thumbs.db
+# SDK 构建产物（gh-action-sdk 会把 bin/ 与 logs/ 放回工作区）
+/bin/
+/logs/
+/out/
+/dl/
+/release/
+# 测试与本地构建
+__pycache__/
+*.pyc
+node_modules/
+nas-kvm/nas-kvmd

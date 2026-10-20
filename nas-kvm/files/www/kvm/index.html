@@ -1,0 +1,247 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>NAS KVM</title>
+<style>
+:root{--bg:#f1f4f8;--card:#fff;--text:#1b2430;--muted:#6b7786;--line:#dde3ea;--soft:#eef2f6;--accent:#0a84c6;--ok:#1f9d55;--warn:#d98a00;--bad:#d64545;--mono:ui-monospace,Menlo,Consolas,monospace}
+@media (prefers-color-scheme:dark){:root{--bg:#10151b;--card:#18202a;--text:#e5ebf2;--muted:#8a97a8;--line:#2a3441;--soft:#202a36;--accent:#2ea0e0;--ok:#3ccf7a;--warn:#f0b13a;--bad:#ef6a6a}}
+*{box-sizing:border-box}
+body{margin:0;background:var(--bg);color:var(--text);font:14px/1.5 -apple-system,"PingFang SC","Microsoft YaHei",system-ui,sans-serif}
+header{display:flex;flex-wrap:wrap;gap:10px 16px;align-items:center;padding:12px 16px;background:var(--card);border-bottom:1px solid var(--line)}
+header h1{font-size:16px;margin:0}
+.chips{display:flex;flex-wrap:wrap;gap:6px;margin-left:auto}
+.chip{display:inline-flex;align-items:center;gap:6px;padding:3px 10px;border-radius:99px;background:var(--soft);font-size:12px;color:var(--muted)}
+.chip i{width:8px;height:8px;border-radius:50%;background:var(--muted)}
+.chip.ok i{background:var(--ok)}.chip.ok{color:var(--text)}.chip.warn i{background:var(--warn)}.chip.bad i{background:var(--bad)}
+main{display:grid;grid-template-columns:minmax(0,1fr) 340px;gap:14px;padding:14px;max-width:1500px;margin:0 auto}
+@media (max-width:980px){main{grid-template-columns:minmax(0,1fr)}}
+.card{background:var(--card);border:1px solid var(--line);border-radius:10px;padding:14px;margin-bottom:14px}
+.card h2{font-size:13px;margin:0 0 10px;color:var(--muted);font-weight:600}
+.screen{position:relative;background:#000;border-radius:8px;overflow:hidden;aspect-ratio:16/9;outline:2px solid transparent;touch-action:none}
+.screen:focus{outline-color:var(--accent)}
+.screen img{position:absolute;inset:0;width:100%;height:100%;object-fit:contain;display:block;user-select:none;-webkit-user-drag:none}
+.screen.cap{cursor:none}
+.overlay{position:absolute;inset:0;display:flex;align-items:center;justify-content:center;color:#aaa;font-size:15px;text-align:center;padding:20px;pointer-events:none}
+.hint{position:absolute;left:8px;bottom:8px;font-size:12px;color:#fff;background:rgba(0,0,0,.55);padding:2px 8px;border-radius:4px;pointer-events:none}
+.bar{display:flex;flex-wrap:wrap;gap:8px;margin-top:10px;align-items:center}.bar .sp{flex:1}
+button{font:inherit;color:var(--text);background:var(--soft);border:1px solid var(--line);border-radius:7px;padding:7px 12px;cursor:pointer}
+button:hover:not(:disabled){border-color:var(--accent)}button:disabled{opacity:.45;cursor:not-allowed}
+button.pri{background:var(--accent);color:#fff;border-color:var(--accent)}button.dan{background:var(--bad);color:#fff;border-color:var(--bad)}
+.grid2{display:grid;grid-template-columns:1fr 1fr;gap:8px}.grid3{display:grid;grid-template-columns:repeat(3,1fr);gap:8px}
+label.f{display:flex;flex-direction:column;gap:3px;font-size:12px;color:var(--muted);margin-bottom:8px}
+label.f.row{flex-direction:row;align-items:center;justify-content:space-between;color:var(--text);font-size:13px}
+input[type=text],input[type=number],input[type=password],select{font:inherit;color:var(--text);background:var(--bg);border:1px solid var(--line);border-radius:6px;padding:6px 8px;width:100%}
+.tabs{display:flex;gap:4px;margin-bottom:12px;border-bottom:1px solid var(--line)}
+.tabs button{border:0;border-bottom:2px solid transparent;border-radius:0;background:none;padding:6px 12px;color:var(--muted)}
+.tabs button.on{color:var(--accent);border-bottom-color:var(--accent)}
+.pane{display:none}.pane.on{display:block}
+.note{font-size:12px;color:var(--muted);margin:6px 0 0}
+.state{font-size:13px;margin:8px 0 0;min-height:20px}
+#toast{position:fixed;left:50%;bottom:20px;transform:translateX(-50%);background:#222;color:#fff;padding:8px 16px;border-radius:8px;font-size:13px;opacity:0;pointer-events:none;transition:opacity .2s;max-width:90vw;z-index:9}#toast.show{opacity:.95}
+.login{position:fixed;inset:0;background:var(--bg);display:none;align-items:center;justify-content:center;z-index:20}.login.show{display:flex}
+.login .box{background:var(--card);border:1px solid var(--line);border-radius:12px;padding:24px;width:min(360px,92vw)}
+.login h2{margin:0 0 12px;font-size:16px;color:var(--text)}
+</style>
+</head>
+<body>
+<header>
+  <h1>NAS KVM</h1>
+  <div class="chips">
+    <span class="chip" id="cWs"><i></i>连接</span>
+    <span class="chip" id="cSerial"><i></i>串口链路</span>
+    <span class="chip" id="cUsb"><i></i>NAS USB</span>
+    <span class="chip" id="cHdmi"><i></i>HDMI</span>
+    <span class="chip" id="cPing"><i></i>Ping</span>
+  </div>
+</header>
+
+<main>
+  <section>
+    <div class="card">
+      <h2>视频 · MS2130 → ustreamer</h2>
+      <div class="screen" id="screen" tabindex="0">
+        <img id="img" alt="" draggable="false">
+        <div class="overlay" id="ovl">等待视频流…</div>
+        <div class="hint" id="hint">点击画面开始捕获键盘与鼠标</div>
+      </div>
+      <div class="bar">
+        <button id="bCad">Ctrl+Alt+Del</button>
+        <button id="bRel">释放全部按键</button>
+        <button id="bFs">全屏</button>
+        <span class="sp"></span>
+        <span class="chip"><i></i><span id="mpos">鼠标 — , —</span></span>
+      </div>
+    </div>
+  </section>
+
+  <aside>
+    <div class="card">
+      <div class="tabs">
+        <button class="on" data-t="macro">开机宏</button>
+        <button data-t="cfg">设置</button>
+      </div>
+
+      <div class="pane on" id="p-macro">
+        <div class="grid2">
+          <label class="f">启动菜单键<select id="kBoot"></select></label>
+          <label class="f">BIOS 设置键<select id="kBios"></select></label>
+          <label class="f">持续时间（秒）<input type="number" id="mDur" min="1" max="60"></label>
+          <label class="f">发送间隔（ms）<input type="number" id="mInt" min="20" max="1000"></label>
+        </div>
+        <div class="bar" style="margin:0 0 8px"><button id="bMacroSave">保存宏设置</button></div>
+        <div class="grid2">
+          <button class="pri" id="bMenu">连发启动菜单键<br><small>期间给 NAS 开机</small></button>
+          <button class="pri" id="bBios">连发 BIOS 键<br><small>期间给 NAS 开机</small></button>
+        </div>
+        <div class="bar"><button id="bTestM">测试启动菜单键</button><button id="bTestB">测试 BIOS 键</button></div>
+        <div class="bar" style="margin-top:6px"><span class="state" id="mState" style="margin:0">空闲</span><span class="sp"></span><button id="bCancel">取消</button></div>
+        <p class="note">点击后会在「持续时间」内连发所选按键，请在这段时间内手动给 NAS 开机（时间不够可调大）。先点「保存宏设置」再运行，设置会写入 /etc/config/nas-kvm，无需重启服务。</p>
+      </div>
+
+      <div class="pane" id="p-cfg">
+        <label class="f">访问 Token（仅保存在本浏览器）<input type="password" id="cTok" autocomplete="off"></label>
+        <div class="bar"><button class="pri" id="bTok">保存并重连</button><button id="bLogout">清除 Token</button></div>
+        <p class="note">串口、端口、视频参数等请在 LuCI「服务 › NAS KVM」中配置。</p>
+      </div>
+    </div>
+  </aside>
+</main>
+
+<div class="login" id="login"><div class="box">
+  <h2>输入访问 Token</h2>
+  <label class="f">Token（见 LuCI「服务 › NAS KVM」或 uci get nas-kvm.main.token）<input type="password" id="lTok" autocomplete="off"></label>
+  <div class="bar"><span class="sp"></span><button class="pri" id="lOk">进入</button></div>
+  <p class="note" id="lErr" style="color:var(--bad)"></p>
+</div></div>
+<div id="toast"></div>
+
+<script>
+"use strict";
+const $=s=>document.querySelector(s);
+const toast=t=>{const e=$('#toast');e.textContent=t;e.classList.add('show');clearTimeout(toast.h);toast.h=setTimeout(()=>e.classList.remove('show'),2200)};
+
+/* ---------- Token ---------- */
+let token='';
+try{token=localStorage.getItem('nas-kvm-token')||''}catch(e){}
+const hm=location.hash.match(/token=([\w-]+)/);
+if(hm){token=hm[1];try{localStorage.setItem('nas-kvm-token',token)}catch(e){}history.replaceState(null,'',location.pathname)}
+function setToken(t){token=t;try{t?localStorage.setItem('nas-kvm-token',t):localStorage.removeItem('nas-kvm-token')}catch(e){}}
+
+/* ---------- API ---------- */
+async function api(path,body){
+  const r=await fetch(path,{method:body===undefined?'GET':'POST',headers:{'Authorization':'Bearer '+token,'Content-Type':'application/json'},body:body===undefined?undefined:JSON.stringify(body)});
+  if(r.status===401){showLogin('Token 不正确');throw new Error('unauthorized')}
+  const j=await r.json().catch(()=>({}));
+  if(!r.ok||j.ok===false)throw new Error(j.error||('HTTP '+r.status));
+  return j;
+}
+const ERR={'busy':'正在执行上一个操作','bad key':'按键名无效','invalid value':'参数无效'};
+const run=async(p,b,okMsg)=>{try{await api(p,b);if(okMsg)toast(okMsg)}catch(e){toast(ERR[e.message]||e.message)}};
+
+/* ---------- 状态 ---------- */
+function chip(id,cls,txt){const e=$(id);e.className='chip '+cls;e.lastChild.textContent=txt}
+let S=null,cfgFilled=false;
+function onStatus(s){
+  S=s;
+  chip('#cSerial',s.serial?'ok':'bad',s.serial?'串口链路正常':'串口无应答');
+  chip('#cUsb',s.usb?'ok':(s.serial?'warn':'bad'),s.usb?'NAS USB 已枚举':'NAS USB 未枚举');
+  chip('#cHdmi',s.hdmi===1?'ok':s.hdmi===0?'bad':'','HDMI '+(s.hdmi===1?'有信号':s.hdmi===0?'无信号':'未知'));
+  chip('#cPing',s.ping===1?'ok':s.ping===0?'bad':'','Ping '+(s.ping===1?'通':s.ping===0?'不通':'未配置'));
+  $('#mState').textContent={idle:'空闲',running:'连发按键中…'}[s.macro]||s.macro;
+  const busy=s.macro!=='idle';
+  ['#bMenu','#bBios'].forEach(x=>$(x).disabled=busy);
+  ['#bTestM','#bTestB'].forEach(x=>$(x).disabled=s.macro!=='idle');
+  $('#bCancel').disabled=s.macro==='idle';
+  if(!cfgFilled){cfgFilled=true;const c=s.cfg;$('#kBoot').value=c.boot_menu_key;$('#kBios').value=c.bios_key;$('#mDur').value=c.macro_duration_s;$('#mInt').value=c.macro_interval_ms}
+  startVideo(s.video_port);
+}
+
+/* ---------- 视频 ---------- */
+let vport=0;
+function startVideo(p){
+  if(p===vport)return;vport=p;
+  const img=$('#img');
+  img.onload=()=>{$('#ovl').style.display='none'};
+  img.onerror=()=>{$('#ovl').style.display='flex';$('#ovl').textContent='视频流不可用（检查 MS2130 与 ustreamer）· 3 秒后重试';setTimeout(()=>{img.src=`http://${location.hostname}:${vport}/stream?t=${Date.now()}`},3000)};
+  img.src=`http://${location.hostname}:${vport}/stream?t=${Date.now()}`;
+}
+
+/* ---------- WebSocket ---------- */
+let ws=null,wsTimer=0,hb=0,backoff=500;
+function connect(){
+  if(!token){showLogin('');return}
+  clearTimeout(wsTimer);
+  try{ws=new WebSocket(`ws://${location.host}/ws?token=${encodeURIComponent(token)}`)}catch(e){return}
+  ws.onopen=()=>{backoff=500;chip('#cWs','ok','已连接');clearInterval(hb);hb=setInterval(()=>send({t:'ping'}),2000);$('#login').classList.remove('show')};
+  ws.onmessage=e=>{let m;try{m=JSON.parse(e.data)}catch(x){return}if(m.t==='status')onStatus(m)};
+  ws.onclose=()=>{clearInterval(hb);chip('#cWs','bad','已断开');wsTimer=setTimeout(()=>{checkAuth().then(connect)},backoff);backoff=Math.min(backoff*2,5000)};
+  ws.onerror=()=>{};
+}
+async function checkAuth(){ // WebSocket 握手失败拿不到状态码，用 REST 区分「Token 错」和「网络断」
+  try{const r=await fetch('/api/status',{headers:{'Authorization':'Bearer '+token}});if(r.status===401)showLogin('Token 不正确')}catch(e){}
+}
+function send(o){if(ws&&ws.readyState===1)ws.send(JSON.stringify(o))}
+
+function showLogin(msg){$('#lErr').textContent=msg;$('#login').classList.add('show');if(ws){ws.onclose=null;ws.close()}clearInterval(hb)}
+$('#lOk').onclick=()=>{const t=$('#lTok').value.trim();if(!t)return;setToken(t);$('#lErr').textContent='';cfgFilled=false;connect()};
+$('#bTok').onclick=()=>{const t=$('#cTok').value.trim();if(!t)return;setToken(t);if(ws){ws.onclose=null;ws.close()}connect();toast('已保存')};
+$('#bLogout').onclick=()=>{setToken('');if(ws){ws.onclose=null;ws.close()}$('#cTok').value='';showLogin('')};
+
+/* ---------- 键盘 ---------- */
+const scr=$('#screen'),img=$('#img');
+const down=new Set();let focused=false;
+const pushKeys=()=>send({t:'key',down:[...down]});
+function releaseAll(){down.clear();send({t:'release'});mouseBtn=0}
+scr.addEventListener('focus',()=>{focused=true;scr.classList.add('cap');$('#hint').textContent='已捕获 · 点击外部或切换窗口自动释放按键'});
+scr.addEventListener('blur',()=>{focused=false;scr.classList.remove('cap');$('#hint').textContent='点击画面开始捕获键盘与鼠标';releaseAll()});
+window.addEventListener('blur',()=>{if(focused)releaseAll()});
+document.addEventListener('visibilitychange',()=>{if(document.hidden)releaseAll()});
+scr.addEventListener('keydown',e=>{e.preventDefault();if(e.repeat)return;down.add(e.code);pushKeys()});
+scr.addEventListener('keyup',e=>{e.preventDefault();down.delete(e.code);pushKeys()});
+$('#bRel').onclick=()=>{releaseAll();toast('已释放全部按键')};
+$('#bCad').onclick=()=>{send({t:'key',down:['ControlLeft','AltLeft','Delete']});setTimeout(()=>send({t:'release'}),80)};
+$('#bFs').onclick=()=>{(scr.requestFullscreen||scr.webkitRequestFullscreen||(()=>toast('浏览器不支持全屏'))).call(scr)};
+
+/* ---------- 鼠标（绝对坐标 0–4095；坐标按「视频实际显示区域」换算） ---------- */
+let mouseBtn=0,mx=0,my=0;
+const clamp=(v,a,b)=>Math.max(a,Math.min(b,v));
+function norm(e){
+  const r=scr.getBoundingClientRect(),iw=img.naturalWidth||16,ih=img.naturalHeight||9;
+  const s=Math.min(r.width/iw,r.height/ih),w=iw*s,h=ih*s,ox=r.left+(r.width-w)/2,oy=r.top+(r.height-h)/2;
+  mx=clamp(Math.round((e.clientX-ox)/w*4095),0,4095);my=clamp(Math.round((e.clientY-oy)/h*4095),0,4095);
+  $('#mpos').textContent=`鼠标 ${mx}, ${my}`;
+}
+const sendMouse=(wheel=0)=>send({t:'mouse',btn:mouseBtn,x:mx,y:my,wheel});
+scr.addEventListener('pointermove',e=>{norm(e);if(focused)sendMouse()});
+scr.addEventListener('pointerdown',e=>{
+  if(!focused){scr.focus();return}
+  norm(e);mouseBtn|=[1,4,2][e.button]||0;sendMouse();e.preventDefault();
+  try{scr.setPointerCapture(e.pointerId)}catch(x){}
+});
+scr.addEventListener('pointerup',e=>{if(!focused)return;norm(e);mouseBtn&=~([1,4,2][e.button]||0);sendMouse()});
+scr.addEventListener('contextmenu',e=>e.preventDefault());
+scr.addEventListener('wheel',e=>{if(!focused)return;e.preventDefault();norm(e);sendMouse(e.deltaY>0?-1:1)},{passive:false});
+
+/* ---------- 开机宏 ---------- */
+const KEYS=['F1','F2','F3','F4','F5','F6','F7','F8','F9','F10','F11','F12','Esc','Del','Tab'];
+['#kBoot','#kBios'].forEach(i=>$(i).innerHTML=KEYS.map(k=>`<option>${k}</option>`).join(''));
+$('#bMacroSave').onclick=()=>run('/api/config',{boot_menu_key:$('#kBoot').value,bios_key:$('#kBios').value,
+  macro_duration_s:+$('#mDur').value,macro_interval_ms:+$('#mInt').value},'宏设置已保存');
+$('#bMenu').onclick=()=>run('/api/macro/run',{kind:'menu'});
+$('#bBios').onclick=()=>run('/api/macro/run',{kind:'bios'});
+$('#bTestM').onclick=()=>run('/api/macro/test',{kind:'menu'},'已发送一次启动菜单键');
+$('#bTestB').onclick=()=>run('/api/macro/test',{kind:'bios'},'已发送一次 BIOS 键');
+$('#bCancel').onclick=()=>run('/api/macro/cancel',{});
+
+document.querySelectorAll('.tabs button').forEach(b=>b.onclick=()=>{
+  document.querySelectorAll('.tabs button').forEach(x=>x.classList.toggle('on',x===b));
+  document.querySelectorAll('.pane').forEach(p=>p.classList.toggle('on',p.id==='p-'+b.dataset.t));
+});
+
+chip('#cWs','','连接中…');
+connect();
+</script>
+</body>
+</html>

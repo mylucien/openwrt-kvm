@@ -1,0 +1,19 @@
+{
+	"luci-app-nas-kvm": {
+		"description": "Grant access to NAS KVM configuration",
+		"read": {
+			"uci": [ "nas-kvm" ],
+			"ubus": { "service": [ "list" ] },
+			"file": {
+				"/dev": [ "list" ]
+			}
+		},
+		"write": {
+			"uci": [ "nas-kvm" ],
+			"file": {
+				"/etc/init.d/nas-kvm": [ "exec" ],
+				"/usr/bin/nas-kvm-ctl": [ "exec" ]
+			}
+		}
+	}
+}
