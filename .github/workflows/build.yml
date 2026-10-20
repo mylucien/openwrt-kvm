@@ -56,6 +56,11 @@ jobs:
           mkdir -p "$RUNNER_TEMP/jsdom"
           cd "$RUNNER_TEMP/jsdom" && npm install --no-audit --no-fund jsdom
 
+      - name: Restore executable bits (zip/Windows checkouts drop them; INSTALL_BIN sets them in the package)
+        run: |
+          chmod +x nas-kvm/files/etc/init.d/nas-kvm nas-kvm/files/usr/bin/nas-kvm-ctl \
+                   nas-kvm/files/etc/uci-defaults/90-nas-kvm nas-kvm/tests/*.py
+
       - name: Build nas-kvmd (ASan + UBSan, hardening flags)
         working-directory: nas-kvm
         run: |
