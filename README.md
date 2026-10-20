@@ -1,18 +1,16 @@
 # nas-kvm 0.4.0
 
-Nokia XG-040G-MD 光猫（ponwrt / ImmortalWrt）上的 NAS 远程 KVM。设计文档见 `Nokia_XG-040G-MD_光猫_KVM_设计文档.md`。
+openwrt上的 NAS 远程 KVM
 
 - `nas-kvm/`            守护进程 nas-kvmd、KVM 控制页、init 脚本、默认配置、测试
 - `luci-app-nas-kvm/`   LuCI 配置页（服务 › NAS KVM）
 
-## 放进 ponwrt 源码树
+## 放进源码树
     cp -r nas-kvm            <ponwrt>/package/utils/nas-kvm
     cp -r luci-app-nas-kvm   <ponwrt>/feeds/luci/applications/luci-app-nas-kvm    # 或放进自己的 feed
     make menuconfig   # Utilities → nas-kvm；LuCI → Applications → luci-app-nas-kvm；另需 ustreamer、kmod-video-uvc、kmod-usb-serial-ch341
     make package/nas-kvm/compile package/luci-app-nas-kvm/compile V=s
 
-## 在 PC 上验证（不需要光猫）
-见设计文档第 10 节。
 
 ## 首次使用
 Token 在首次启动时自动生成：`uci get nas-kvm.main.token`，或在 LuCI 里查看。
